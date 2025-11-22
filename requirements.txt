@@ -1,0 +1,5 @@
+# Simple VigilIntel Connector Requirements
+pycti>=6.3.0
+stix2>=3.0.1
+requests>=2.31.0
+PyYAML>=6.0

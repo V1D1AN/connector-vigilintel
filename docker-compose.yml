@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  vigilintel:
+    build: .
+    environment:
+      - OPENCTI_URL=${OPENCTI_URL:-http://opencti:8080}
+      - OPENCTI_TOKEN=${OPENCTI_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ID:-vigilintel}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=VigilIntel
+      - CONNECTOR_SCOPE=Report
+      - CONNECTOR_CONFIDENCE_LEVEL=75
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_AUTO=true
+      - VIGILINTEL_INTERVAL=${VIGILINTEL_INTERVAL:-1}  # 1 hour for testing
+      - VIGILINTEL_LANGUAGE=${VIGILINTEL_LANGUAGE:-FR}  # Language: FR or EN
+      - FORCE_RUN=${FORCE_RUN:-false}  # Set to true to force immediate run
+    restart: unless-stopped
+
+# Example .env file content:
+# OPENCTI_URL=http://localhost:8080
+# OPENCTI_TOKEN=your_token_here
+# CONNECTOR_ID=vigilintel-$(date +%s)
+# VIGILINTEL_INTERVAL=24
+# VIGILINTEL_LANGUAGE=FR  # or EN for English

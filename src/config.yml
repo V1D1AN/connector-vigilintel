@@ -1,0 +1,14 @@
+opencti:
+  url: 'http://localhost:8080'
+  token: 'votre_token'
+
+connector:
+  id: 'vigilintel-simple'
+  type: 'EXTERNAL_IMPORT'
+  name: 'VigilIntel Simple'
+  scope: 'Report'
+  confidence_level: 75
+  auto: true
+
+vigilintel:
+  interval: 24  # Heures
