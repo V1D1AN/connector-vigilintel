@@ -68,8 +68,16 @@ class SimpleVigilIntelConnector:
             self.helper.log_info(f"GitHub response status: {response.status_code}")
             
             if response.status_code == 200:
-                data = response.json()
-                self.helper.log_info(f"Successfully fetched JSON report ({len(response.text)} characters)")
+                # Try to parse JSON with error handling
+                try:
+                    data = response.json()
+                    self.helper.log_info(f"Successfully fetched JSON report ({len(response.text)} characters)")
+                    return data
+                    
+                except (json.JSONDecodeError, ValueError) as json_error:
+                    self.helper.log_error(f"JSON parsing failed: {str(json_error)}")
+                    self.helper.log_error("Today's report appears to be malformed. Will retry on next cycle.")
+                    return None
                 self.helper.log_info(f"Report contains {len(data.get('articles', []))} articles")
                 return data
             elif response.status_code == 404:
@@ -204,8 +212,21 @@ class SimpleVigilIntelConnector:
         # 1. Main IOC field: 'indicator_of_compromise'
         ioc_field = article_json.get('indicator_of_compromise', '')
         if ioc_field:
-            ioc_sources.append(('indicator_of_compromise', ioc_field))
-            self.helper.log_info(f"Found 'indicator_of_compromise' field: {type(ioc_field)}")
+            # NEW FORMAT: Categorized dict (e.g., {"IPv4": [...], "DOMAIN": [...]})
+            if isinstance(ioc_field, dict):
+                self.helper.log_info(f"Found new categorized IOC format: {list(ioc_field.keys())}")
+                for category, ioc_list in ioc_field.items():
+                    if isinstance(ioc_list, list) and ioc_list:
+                        self.helper.log_info(f"Processing {len(ioc_list)} IOCs from category: {category}")
+                        # Map category to OpenCTI IOC type
+                        opencti_type = self._map_vigilintel_category_to_opencti(category)
+                        if opencti_type:
+                            iocs.setdefault(opencti_type, []).extend(ioc_list)
+                            self.helper.log_info(f"  Mapped {category} -> {opencti_type}: {ioc_list}")
+            # OLD FORMAT: Flat list of IOCs
+            else:
+                ioc_sources.append(('indicator_of_compromise', ioc_field))
+                self.helper.log_info(f"Found legacy IOC format: {type(ioc_field)}")
         
         # 2. Analysis field (might contain IOCs)
         analysis_field = article_json.get('analyse', '')
@@ -261,13 +282,13 @@ class SimpleVigilIntelConnector:
                             
                             # Check if it's a hash (MD5, SHA1, SHA256)
                             if len(cleaned_item) == 32 and all(c in '0123456789abcdefABCDEF' for c in cleaned_item):
-                                iocs.setdefault('md5', []).append(cleaned_item.lower())
+                                iocs.setdefault('file-hash-md5', []).append(cleaned_item.lower())
                                 self.helper.log_info(f"    Added MD5 hash: {cleaned_item}")
                             elif len(cleaned_item) == 40 and all(c in '0123456789abcdefABCDEF' for c in cleaned_item):
-                                iocs.setdefault('sha1', []).append(cleaned_item.lower())
+                                iocs.setdefault('file-hash-sha1', []).append(cleaned_item.lower())
                                 self.helper.log_info(f"    Added SHA1 hash: {cleaned_item}")
                             elif len(cleaned_item) == 64 and all(c in '0123456789abcdefABCDEF' for c in cleaned_item):
-                                iocs.setdefault('sha256', []).append(cleaned_item.lower())
+                                iocs.setdefault('file-hash-sha256', []).append(cleaned_item.lower())
                                 self.helper.log_info(f"    Added SHA256 hash: {cleaned_item}")
                             # Check if it's a domain (contains dots and valid TLD)
                             elif ('.' in cleaned_item and 
@@ -275,7 +296,7 @@ class SimpleVigilIntelConnector:
                                   len(cleaned_item.split('.')) >= 2 and
                                   not any(char in cleaned_item for char in [' ', '\n', '\t']) and
                                   len(cleaned_item) < 100):
-                                iocs.setdefault('domain', []).append(cleaned_item)
+                                iocs.setdefault('domain-name', []).append(cleaned_item)
                                 self.helper.log_info(f"    Added domain: {cleaned_item}")
                             # If none of the above but contains useful info, treat as malware name
                             elif (len(cleaned_item) > 2 and 
@@ -358,19 +379,67 @@ class SimpleVigilIntelConnector:
         
         return iocs
     
+    def _map_vigilintel_category_to_opencti(self, category: str) -> Optional[str]:
+        """Map VigilIntel IOC categories to OpenCTI indicator types"""
+        category_mapping = {
+            # Network indicators (uppercase keys to match category.upper())
+            'IPV4': 'ipv4-addr',
+            'IPV6': 'ipv6-addr', 
+            'DOMAIN': 'domain-name',
+            'URL': 'url',
+            'EMAIL': 'email-addr',
+            
+            # File indicators - support both VigilIntel formats
+            'MD5': 'file-hash-md5',
+            'SHA1': 'file-hash-sha1', 
+            'SHA256': 'file-hash-sha256',
+            'SHA512': 'file-hash-sha512',
+            'HASH': 'file-hash',
+            
+            # VigilIntel's actual file hash formats (as you mentioned)
+            'FILE-HASH-MD5': 'file-hash-md5',
+            'FILE-HASH-SHA1': 'file-hash-sha1',
+            'FILE-HASH-SHA256': 'file-hash-sha256',
+            'FILE-HASH-SHA512': 'file-hash-sha512',
+            'FILE_HASH_MD5': 'file-hash-md5',
+            'FILE_HASH_SHA1': 'file-hash-sha1',
+            'FILE_HASH_SHA256': 'file-hash-sha256',
+            'FILE_HASH_SHA512': 'file-hash-sha512',
+            
+            # Other indicators
+            'FILE_PATH': 'file-path',
+            'REGISTRY_KEY': 'windows-registry-key',
+            
+            # Vulnerabilities and malware
+            'CVE': 'vulnerability',
+            'MALWARE': 'malware',
+            
+            # Additional common types
+            'CERTIFICATE': 'x509-certificate',
+            'MUTEX': 'mutex',
+            'USER_AGENT': 'user-agent'
+        }
+        
+        mapped_type = category_mapping.get(category.upper())
+        if mapped_type:
+            return mapped_type
+        else:
+            self.helper.log_warning(f"Unknown IOC category: {category}")
+            return None
+    
     def _extract_iocs_from_text(self, text: str) -> Dict[str, List[str]]:
         """Extract IOCs from text using regex patterns"""
         iocs = {}
         
         patterns = {
-            'ip': re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'),
-            'domain': re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'),
+            'ipv4-addr': re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'),
+            'domain-name': re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'),
             'url': re.compile(r'https?://[^\s\'"<>\]\)]+'),
-            'md5': re.compile(r'\b[a-fA-F0-9]{32}\b'),
-            'sha1': re.compile(r'\b[a-fA-F0-9]{40}\b'),
-            'sha256': re.compile(r'\b[a-fA-F0-9]{64}\b'),
-            'email': re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-            'cve': re.compile(r'CVE-\d{4}-\d{4,7}'),
+            'file-hash-md5': re.compile(r'\b[a-fA-F0-9]{32}\b'),
+            'file-hash-sha1': re.compile(r'\b[a-fA-F0-9]{40}\b'),
+            'file-hash-sha256': re.compile(r'\b[a-fA-F0-9]{64}\b'),
+            'email-addr': re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+            'vulnerability': re.compile(r'CVE-\d{4}-\d{4,7}'),
         }
         
         for ioc_type, pattern in patterns.items():
@@ -524,7 +593,7 @@ class SimpleVigilIntelConnector:
                 clean_url = value.rstrip('.,;:!?)"\'')
                 if len(clean_url) > 10 and clean_url.startswith('http'):
                     filtered.append(clean_url)
-            elif ioc_type in ['md5', 'sha1', 'sha256', 'sha512', 'hash']:
+            elif ioc_type in ['file-hash-md5', 'file-hash-sha1', 'file-hash-sha256', 'file-hash-sha512', 'file-hash']:
                 # Validate hash format
                 if re.match(r'^[a-fA-F0-9]+$', value):
                     filtered.append(value.lower())
@@ -579,16 +648,16 @@ class SimpleVigilIntelConnector:
         
         # IOC patterns optimisés pour le contenu d'IOCs
         patterns = {
-            'ip': re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'),
-            'domain': re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'),
+            'ipv4-addr': re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'),
+            'domain-name': re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'),
             'url': re.compile(r'https?://[^\s\'"<>\]\)]+'),
-            'md5': re.compile(r'\b[a-fA-F0-9]{32}\b'),
-            'sha1': re.compile(r'\b[a-fA-F0-9]{40}\b'),
-            'sha256': re.compile(r'\b[a-fA-F0-9]{64}\b'),
-            'email': re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-            'cve': re.compile(r'CVE-\d{4}-\d{4,7}'),
-            'file_path': re.compile(r'[A-Za-z]:\\[^<>:"|?*\s]+\.[a-zA-Z]{2,4}'),
-            'registry_key': re.compile(r'(?:HKEY_|HKLM\\|HKCU\\)[^\\<>:"|?*\s]+'),
+            'file-hash-md5': re.compile(r'\b[a-fA-F0-9]{32}\b'),
+            'file-hash-sha1': re.compile(r'\b[a-fA-F0-9]{40}\b'),
+            'file-hash-sha256': re.compile(r'\b[a-fA-F0-9]{64}\b'),
+            'email-addr': re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+            'vulnerability': re.compile(r'CVE-\d{4}-\d{4,7}'),
+            'file-path': re.compile(r'[A-Za-z]:\\[^<>:"|?*\s]+\.[a-zA-Z]{2,4}'),
+            'windows-registry-key': re.compile(r'(?:HKEY_|HKLM\\|HKCU\\)[^\\<>:"|?*\s]+'),
             'mutex': re.compile(r'\\Sessions\\[0-9]+\\BaseNamedObjects\\[a-zA-Z0-9_-]+'),
         }
         
@@ -625,7 +694,7 @@ class SimpleVigilIntelConnector:
                         clean_url = match.rstrip('.,;:!?)"\'')
                         if len(clean_url) > 10:
                             filtered_matches.append(clean_url)
-                    elif ioc_type in ['md5', 'sha1', 'sha256']:
+                    elif ioc_type in ['file-hash-md5', 'file-hash-sha1', 'file-hash-sha256']:
                         if not any(char.isalpha() and char.lower() not in 'abcdef' for char in match.lower()):
                             filtered_matches.append(match.lower())
                     else:
@@ -694,16 +763,17 @@ class SimpleVigilIntelConnector:
             return f"[file:parent_directory_ref.path = '{escaped_path}']"
         
         stix_patterns = {
-            'ip': lambda x: f"[ipv4-addr:value = '{x}']",
-            'domain': lambda x: f"[domain-name:value = '{x}']", 
+            'ipv4-addr': lambda x: f"[ipv4-addr:value = '{x}']",
+            'domain-name': lambda x: f"[domain-name:value = '{x}']", 
             'url': lambda x: f"[url:value = '{x}']",
-            'md5': lambda x: f"[file:hashes.MD5 = '{x}']",
-            'sha1': lambda x: f"[file:hashes.SHA1 = '{x}']",
-            'sha256': lambda x: f"[file:hashes.SHA256 = '{x}']",
-            'email': lambda x: f"[email-addr:value = '{x}']",
-            'file_path': create_file_path_pattern,
-            'registry_key': lambda x: f"[windows-registry-key:key = '{x}']",
-            'malware_name': lambda x: f"[malware:name = '{x}']",
+            'file-hash-md5': lambda x: f"[file:hashes.MD5 = '{x}']",
+            'file-hash-sha1': lambda x: f"[file:hashes.SHA1 = '{x}']",
+            'file-hash-sha256': lambda x: f"[file:hashes.SHA256 = '{x}']",
+            'email-addr': lambda x: f"[email-addr:value = '{x}']",
+            'file-path': create_file_path_pattern,
+            'windows-registry-key': lambda x: f"[windows-registry-key:key = '{x}']",
+            'malware': lambda x: f"[malware:name = '{x}']",
+            'vulnerability': lambda x: f"[vulnerability:name = '{x}']",
         }
         
         for ioc_type, values in iocs.items():
@@ -717,13 +787,13 @@ class SimpleVigilIntelConnector:
                     
                     # Déterminer les labels appropriés
                     labels = ["malicious-activity"]
-                    if ioc_type in ['ip', 'domain', 'url']:
+                    if ioc_type in ['ipv4-addr', 'domain-name', 'url']:
                         labels.append("malicious-infrastructure")
-                    elif ioc_type in ['md5', 'sha1', 'sha256']:
+                    elif ioc_type in ['file-hash-md5', 'file-hash-sha1', 'file-hash-sha256']:
                         labels.append("malware")
-                    elif ioc_type == 'cve':
+                    elif ioc_type == 'vulnerability':
                         labels = ["vulnerability"]
-                    elif ioc_type == 'malware_name':
+                    elif ioc_type == 'malware':
                         labels = ["malicious-activity", "malware"]
                     
                     # Créer l'indicateur
