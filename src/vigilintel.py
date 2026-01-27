@@ -320,7 +320,7 @@ class VigilIntelConnector:
                 # Report
                 report = Report(name=title, description=desc[:500] if desc else None, published=report_date.strftime("%Y-%m-%dT00:00:00Z"),
                     created_by_ref=self.identity_id, object_refs=article_refs if article_refs else [self.identity_id],
-                    labels=tags if tags else ["vigilintel"], external_references=ext_refs if ext_refs else None, report_types=["threat-report"])
+                    labels=tags if tags else ["vigilintel"], external_references=ext_refs if ext_refs else None, report_types=["Threat-Report"])
                 stix_objects.append(report)
                 object_refs.append(report.id)
                 object_refs.extend(article_refs)
@@ -382,7 +382,7 @@ class VigilIntelConnector:
             daily = Report(name=f"VigilIntel Daily Report - {report_date.strftime('%Y-%m-%d')}",
                 description=f"Daily CTI synthesis ({self.language.upper()})", published=report_date.strftime("%Y-%m-%dT00:00:00Z"),
                 created_by_ref=self.identity_id, object_refs=list(set(all_refs)) if all_refs else [self.identity_id],
-                labels=["vigilintel", "daily-report"], report_types=["threat-report"])
+                labels=["vigilintel", "daily-report"], report_types=["Threat-Report"])
             all_objects.append(daily)
             
             bundle = Bundle(objects=all_objects, allow_custom=True)
