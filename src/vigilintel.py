@@ -338,20 +338,38 @@ class VigilIntelConnector:
             
             all_objects, all_refs, stats = [self._get_stix_identity()], [], {}
             
-            sections = [
-                (self.import_analysis, "Analyse transversale", self._process_json_analysis, "analysis"),
-                (self.import_threat_actors, "Synthese des acteurs malveillants", self._process_json_threat_actors, "threat_actors"),
-                (self.import_vulnerabilities, "Synthese des vulnerabilites", self._process_json_vulnerabilities, "vulnerabilities"),
-                (self.import_incidents, "Synthese des violations de donnees", self._process_json_incidents, "incidents"),
-                (self.import_geopolitical, "Synthese de l'actualite geopolitique", self._process_json_geopolitical, "geopolitical"),
-                (self.import_articles, "Articles", self._process_json_articles, "articles"),
-            ]
+            # Section mappings with both accented and non-accented versions
+            section_mappings = {
+                "analysis": ["Analyse transversale"],
+                "threat_actors": ["Synthèse des acteurs malveillants", "Synthese des acteurs malveillants"],
+                "vulnerabilities": ["Synthèse des vulnérabilités", "Synthese des vulnerabilites"],
+                "incidents": ["Synthèse des violations de données", "Synthese des violations de donnees"],
+                "geopolitical": ["Synthèse de l'actualité géopolitique", "Synthese de l'actualite geopolitique"],
+                "articles": ["Articles"],
+            }
             
-            for enabled, key, processor, stat_name in sections:
-                # Try with accented and non-accented keys
-                section_data = data.get(key) or data.get(key.replace("e", "é").replace("e", "è"))
-                if enabled and section_data:
-                    self.helper.log_info(f"Processing: {key}")
+            processors = {
+                "analysis": (self.import_analysis, self._process_json_analysis),
+                "threat_actors": (self.import_threat_actors, self._process_json_threat_actors),
+                "vulnerabilities": (self.import_vulnerabilities, self._process_json_vulnerabilities),
+                "incidents": (self.import_incidents, self._process_json_incidents),
+                "geopolitical": (self.import_geopolitical, self._process_json_geopolitical),
+                "articles": (self.import_articles, self._process_json_articles),
+            }
+            
+            for stat_name, keys in section_mappings.items():
+                enabled, processor = processors[stat_name]
+                if not enabled:
+                    continue
+                    
+                section_data = None
+                for key in keys:
+                    if key in data:
+                        section_data = data[key]
+                        break
+                
+                if section_data:
+                    self.helper.log_info(f"Processing: {stat_name}")
                     objects, refs = processor(section_data, report_date)
                     all_objects.extend(objects)
                     all_refs.extend(refs)
@@ -398,7 +416,7 @@ class VigilIntelConnector:
         if count > 0:
             processed[date_str] = content_hash
             state["processed_hashes"] = processed
-            state["last_run"] = datetime.now(timezone.utc).isoformat()
+            state["last_run"] = int(datetime.now(timezone.utc).timestamp())
             self.helper.set_state(state)
         
         return count > 0, status
@@ -422,12 +440,24 @@ class VigilIntelConnector:
                 state = self.helper.get_state() or {}
                 last_run = state.get("last_run")
                 should_run = True
-                if last_run:
-                    elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last_run.replace("Z", "+00:00"))).total_seconds()
+                
+                if last_run is not None:
+                    # Handle both int timestamp and string ISO format
+                    if isinstance(last_run, int):
+                        last_run_ts = last_run
+                    elif isinstance(last_run, str):
+                        last_run_ts = datetime.fromisoformat(last_run.replace("Z", "+00:00")).timestamp()
+                    else:
+                        last_run_ts = 0
+                    
+                    elapsed = int(datetime.now(timezone.utc).timestamp()) - last_run_ts
                     if elapsed < self.interval:
                         should_run = False
+                        self.helper.log_info(f"Next run in {self.interval - elapsed}s")
+                
                 if should_run:
                     self._run_import()
+                
                 time.sleep(60)
             except (KeyboardInterrupt, SystemExit):
                 break
