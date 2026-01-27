@@ -1,0 +1,26 @@
+opencti:
+  url: "http://localhost:8080"
+  token: "ChangeMe"
+
+connector:
+  id: "vigilintel"
+  type: "EXTERNAL_IMPORT"
+  name: "VigilIntel"
+  scope: "vigilintel"
+  log_level: "info"
+  update_existing_data: true
+
+vigilintel:
+  github_url: "https://raw.githubusercontent.com/kidrek/VigilIntel/main"
+  format: "stix"  # "stix" or "json"
+  language: "en"  # "en" or "fr"
+  interval: 86400
+  days_to_import: 1
+  # JSON format options:
+  import_threat_actors: true
+  import_vulnerabilities: true
+  import_incidents: true
+  import_articles: true
+  import_geopolitical: true
+  import_analysis: true
+  create_indicators: true

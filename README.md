@@ -1,121 +1,63 @@
-# VigilIntel Connector for OpenCTI
+# VigilIntel Connector v2 for OpenCTI
 
-Ce connecteur importe les rapports quotidiens de threat intelligence depuis [VigilIntel](https://github.com/kidrek/VigilIntel) dans OpenCTI.
+Import daily threat intelligence from [VigilIntel](https://github.com/kidrek/VigilIntel) into OpenCTI.
 
-## Fonctionnalités
+## Features
 
-- ✅ **Import automatique** des rapports quotidiens JSON depuis GitHub
-- ✅ **Extraction intelligente des IOCs** : IPs, domaines, hashes, URLs, CVEs
-- ✅ **Support bilingue** : Français (FR) et Anglais (EN)  
-- ✅ **Création d'entités OpenCTI** : Reports, Indicators, Observables
-- ✅ **Relations STIX** : Threat Actors, Attack Patterns, Vulnerabilities
-- ✅ **Logging détaillé** pour le debug
+### Dual Format Support
+
+| Format | Description | Data Imported |
+|--------|-------------|---------------|
+| **STIX** | Direct STIX 2.1 bundle import | All objects as-is (threat actors, vulns, incidents, TTPs, reports, notes, relationships) |
+| **JSON** | Full JSON parsing | All 6 sections parsed and converted to STIX |
+
+### JSON Sections (when format=json)
+
+| Section | OpenCTI Objects Created |
+|---------|------------------------|
+| `Analyse transversale` | Note (strategic-analysis) |
+| `Synthèse des acteurs malveillants` | ThreatActor |
+| `Synthèse des vulnérabilités` | Vulnerability (with CVSS) |
+| `Synthèse des violations de données` | Identity (victim) + Note (data-breach) |
+| `Synthèse de l'actualité géopolitique` | Note (geopolitical-analysis) |
+| `Articles` | Report + Note + Indicator + AttackPattern |
+
+## Quick Start
+
+```bash
+cp .env.sample .env
+nano .env  # Set OPENCTI_URL and OPENCTI_TOKEN
+docker-compose up -d
+```
 
 ## Configuration
 
-### Variables d'environnement
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIGILINTEL_FORMAT` | `stix` | `stix` or `json` |
+| `VIGILINTEL_LANGUAGE` | `en` | `en` or `fr` |
+| `VIGILINTEL_DAYS_TO_IMPORT` | `1` | Days to look back |
+| `VIGILINTEL_INTERVAL` | `86400` | Check interval (seconds) |
 
-```bash
-# OpenCTI Configuration
-OPENCTI_URL=http://localhost:8080
-OPENCTI_TOKEN=your_token_here
+### JSON-specific options
 
-# Connector Configuration  
-CONNECTOR_ID=vigilintel-unique-id
-VIGILINTEL_INTERVAL=24  # Heures entre chaque exécution
-VIGILINTEL_LANGUAGE=FR  # Language: FR (Français) ou EN (English)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIGILINTEL_IMPORT_THREAT_ACTORS` | `true` | Import threat actors |
+| `VIGILINTEL_IMPORT_VULNERABILITIES` | `true` | Import CVEs |
+| `VIGILINTEL_IMPORT_INCIDENTS` | `true` | Import data breaches |
+| `VIGILINTEL_IMPORT_ARTICLES` | `true` | Import articles |
+| `VIGILINTEL_IMPORT_GEOPOLITICAL` | `true` | Import geopolitical notes |
+| `VIGILINTEL_IMPORT_ANALYSIS` | `true` | Import strategic analysis |
+| `VIGILINTEL_CREATE_INDICATORS` | `true` | Create indicators from IOCs |
 
-# Optional: Force immediate run
-FORCE_RUN=true
-```
+## Recommendation
 
-### Choix de la langue
+**Use `VIGILINTEL_FORMAT=stix`** when available - it imports the complete STIX bundle directly without transformation, preserving all relationships and custom properties.
 
-Le connecteur supporte le **français** et **l'anglais** :
+Use `VIGILINTEL_FORMAT=json` if you need granular control over which sections to import, or if STIX files are not available for certain dates.
 
-- **`VIGILINTEL_LANGUAGE=FR`** : Utilise la section française des rapports
-- **`VIGILINTEL_LANGUAGE=EN`** : Utilise la section anglaise des rapports  
-- **Défaut** : FR si non spécifié
+## Credits
 
-**Note** : Si la langue configurée n'est pas disponible dans un rapport, le connecteur utilisera automatiquement la langue disponible.
-
-## Installation et démarrage
-
-```bash
-# 1. Cloner et configurer
-git clone <ce-repo>
-cd vigilintel-connector
-
-# 2. Configurer les variables
-cp .env.example .env
-# Éditer .env avec vos paramètres
-
-# 3. Démarrer le connecteur
-docker-compose up -d
-
-# 4. Voir les logs
-docker-compose logs -f vigilintel
-```
-
-## Utilisation des langues
-
-### Exemples de configuration
-
-**Pour utiliser le français :**
-```bash
-echo "VIGILINTEL_LANGUAGE=FR" >> .env
-```
-
-**Pour utiliser l'anglais :**
-```bash
-echo "VIGILINTEL_LANGUAGE=EN" >> .env
-```
-
-### Logs d'exemple
-
-```
-[INFO] Configured language preference: FR
-[INFO] Using configured language: French (FR)
-[INFO] Processing 15 articles from JSON report
-[INFO] Creating report: Analyse transversale cyber du 2025-11-20
-[INFO] Extracted 45 SHA256 hashes from article
-[INFO] Extracted 30 domains from article  
-[INFO] Created 150+ indicators and observables
-```
-
-## Structure des données VigilIntel
-
-Le connecteur traite automatiquement la structure FR/EN :
-
-```json
-{
-  "FR": {
-    "Articles": [...],
-    "Synthèse des acteurs malveillants": [...],
-    "Synthèse des vulnérabilités": [...]
-  },
-  "EN": {
-    "Articles": [...], 
-    "Malicious actors summary": [...],
-    "Vulnerabilities summary": [...]
-  }
-}
-```
-
-## Types d'IOCs extraits
-
-Le connecteur détecte intelligemment :
-
-- **Hashes** : MD5 (32 chars), SHA1 (40 chars), SHA256 (64 chars)
-- **Domaines** : `example.com`, `sub.domain.org`
-- **URLs** : `https://example.com/path` 
-- **IPs** : `192.168.1.1`, `2001:db8::1`
-- **CVEs** : `CVE-2025-1234`
-- **Emails** : `user@domain.com`
-
-## Debugging
-
-Pour débugger l'extraction des IOCs :
-```bash
-docker-compose logs -f vigilintel | grep -E "(Extracted|Added|Processing)"
-```
+- [VigilIntel by Kidrek](https://github.com/kidrek/VigilIntel)
+- [OpenCTI Platform](https://github.com/OpenCTI-Platform)

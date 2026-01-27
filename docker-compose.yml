@@ -1,26 +1,41 @@
 version: '3.8'
 
 services:
-  vigilintel:
+  connector-vigilintel:
     build: .
+    container_name: opencti-connector-vigilintel
+    restart: unless-stopped
     environment:
+      # OpenCTI
       - OPENCTI_URL=${OPENCTI_URL:-http://opencti:8080}
       - OPENCTI_TOKEN=${OPENCTI_TOKEN}
+      # Connector
       - CONNECTOR_ID=${CONNECTOR_ID:-vigilintel}
       - CONNECTOR_TYPE=EXTERNAL_IMPORT
       - CONNECTOR_NAME=VigilIntel
-      - CONNECTOR_SCOPE=Report
-      - CONNECTOR_CONFIDENCE_LEVEL=75
-      - CONNECTOR_LOG_LEVEL=info
-      - CONNECTOR_AUTO=true
-      - VIGILINTEL_INTERVAL=${VIGILINTEL_INTERVAL:-1}  # 1 hour for testing
-      - VIGILINTEL_LANGUAGE=${VIGILINTEL_LANGUAGE:-FR}  # Language: FR or EN
-      - FORCE_RUN=${FORCE_RUN:-false}  # Set to true to force immediate run
-    restart: unless-stopped
+      - CONNECTOR_SCOPE=vigilintel
+      - CONNECTOR_LOG_LEVEL=${CONNECTOR_LOG_LEVEL:-info}
+      - CONNECTOR_DURATION_PERIOD=${CONNECTOR_DURATION_PERIOD:-PT24H}
+      - CONNECTOR_UPDATE_EXISTING_DATA=${CONNECTOR_UPDATE_EXISTING_DATA:-true}
+      # VigilIntel - Format: "stix" (recommended) or "json"
+      - VIGILINTEL_FORMAT=${VIGILINTEL_FORMAT:-stix}
+      # Language: "en" or "fr"
+      - VIGILINTEL_LANGUAGE=${VIGILINTEL_LANGUAGE:-en}
+      - VIGILINTEL_INTERVAL=${VIGILINTEL_INTERVAL:-86400}
+      - VIGILINTEL_DAYS_TO_IMPORT=${VIGILINTEL_DAYS_TO_IMPORT:-1}
+      - VIGILINTEL_GITHUB_URL=${VIGILINTEL_GITHUB_URL:-https://raw.githubusercontent.com/kidrek/VigilIntel/main}
+      # JSON import options (ignored when format=stix)
+      - VIGILINTEL_IMPORT_THREAT_ACTORS=${VIGILINTEL_IMPORT_THREAT_ACTORS:-true}
+      - VIGILINTEL_IMPORT_VULNERABILITIES=${VIGILINTEL_IMPORT_VULNERABILITIES:-true}
+      - VIGILINTEL_IMPORT_INCIDENTS=${VIGILINTEL_IMPORT_INCIDENTS:-true}
+      - VIGILINTEL_IMPORT_ARTICLES=${VIGILINTEL_IMPORT_ARTICLES:-true}
+      - VIGILINTEL_IMPORT_GEOPOLITICAL=${VIGILINTEL_IMPORT_GEOPOLITICAL:-true}
+      - VIGILINTEL_IMPORT_ANALYSIS=${VIGILINTEL_IMPORT_ANALYSIS:-true}
+      - VIGILINTEL_CREATE_INDICATORS=${VIGILINTEL_CREATE_INDICATORS:-true}
+    networks:
+      - opencti-net
 
-# Example .env file content:
-# OPENCTI_URL=http://localhost:8080
-# OPENCTI_TOKEN=your_token_here
-# CONNECTOR_ID=vigilintel-$(date +%s)
-# VIGILINTEL_INTERVAL=24
-# VIGILINTEL_LANGUAGE=FR  # or EN for English
+networks:
+  opencti-net:
+    external: true
+    name: opencti_default
