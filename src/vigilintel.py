@@ -114,7 +114,12 @@ class VigilIntelConnector:
     def _build_report_url(self, date: datetime, format_type: str = None) -> str:
         fmt = format_type or self.format
         year, month, date_str = date.strftime("%Y"), date.strftime("%m"), date.strftime("%Y-%m-%d")
-        filename = f"{date_str}-report.stix_{self.language}.json" if fmt == "stix" else f"{date_str}-report_{self.language}.json"
+        if fmt == "stix":
+            filename = f"{date_str}-report-stix.json"
+        elif fmt == "md":
+            filename = f"{date_str}-report.md"
+        else:
+            filename = f"{date_str}-report.json"
         return f"{self.github_base_url}/{year}/{month}/{filename}"
 
     def _get_dates_to_import(self) -> List[datetime]:
@@ -790,6 +795,7 @@ class VigilIntelConnector:
 
         data = self._fetch_report(self._build_report_url(report_date))
         if not data:
+            self.helper.log_info(f"No report available for {date_str}, will retry next interval")
             return False, f"No report for {date_str}"
 
         content_hash = self._compute_content_hash(data)
@@ -807,7 +813,6 @@ class VigilIntelConnector:
         if count > 0:
             processed[date_str] = content_hash
             state["processed_hashes"] = processed
-            state["last_run"] = int(datetime.now(timezone.utc).timestamp())
             self.helper.set_state(state)
 
         return count > 0, status
@@ -823,6 +828,12 @@ class VigilIntelConnector:
         except Exception as e:
             self.helper.api.work.to_processed(work_id, f"Error: {str(e)}")
             return f"Error: {str(e)}"
+        finally:
+            # Always update last_run so we respect the interval even when
+            # no report was available (404) or nothing was imported.
+            state = self.helper.get_state() or {}
+            state["last_run"] = int(datetime.now(timezone.utc).timestamp())
+            self.helper.set_state(state)
 
     def run(self):
         self.helper.log_info(f"VigilIntel Connector v2 Starting - Format: {self.format}, Language: {self.language}")
