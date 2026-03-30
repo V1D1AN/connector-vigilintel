@@ -208,6 +208,178 @@ class VigilIntelConnector:
 
     # ─── STIX Bundle processing ───────────────────────────────────────
 
+    def _split_stix_bundle(self, bundle_data: Dict) -> Dict:
+        """Split a monolithic STIX bundle into clustered sub-reports.
+        
+        Strategy:
+        1. Identify shared infrastructure (VigilIntel identity, markings, extensions)
+        2. Use Notes as cluster seeds — each Note's object_refs define a topic
+        3. Flood-fill each cluster via relationships (source/target graph walk)
+        4. Standalone notes (Strategic, Geopolitical) stay as-is under the daily report
+        5. Entity-bearing notes (Breach, Vulnerability, Threat) get their own sub-Report
+        6. The original Report becomes a digest referencing only sub-reports + standalone notes
+        """
+        objects = bundle_data.get("objects", [])
+        obj_map = {o["id"]: o for o in objects}
+
+        # Step 1: Identify shared infrastructure (included in final bundle but not in any cluster)
+        shared_types = {"marking-definition", "extension-definition"}
+        original_report = None
+        vigilintel_identity_id = None
+        shared_ids = set()
+
+        for obj in objects:
+            if obj["type"] in shared_types:
+                shared_ids.add(obj["id"])
+            elif obj["type"] == "report":
+                original_report = obj
+            elif obj["type"] == "identity" and obj.get("name") == "VigilIntel" and obj.get("identity_class") == "organization":
+                vigilintel_identity_id = obj["id"]
+                shared_ids.add(obj["id"])
+
+        if not original_report:
+            return bundle_data  # No report to split, return as-is
+
+        # Step 2: Collect all notes and relationships
+        notes = [o for o in objects if o["type"] == "note"]
+        relationships = [o for o in objects if o["type"] == "relationship"]
+
+        # Build adjacency: for each object ID, which relationships touch it?
+        rel_by_endpoint = {}
+        for rel in relationships:
+            for endpoint in (rel["source_ref"], rel["target_ref"]):
+                rel_by_endpoint.setdefault(endpoint, []).append(rel)
+
+        # Step 3: Classify notes and build clusters
+        standalone_prefixes = ("Strategic |", "Geopolitical |")
+        standalone_note_ids = []
+        clusters = []  # list of {"seed_note": note, "object_ids": set()}
+
+        for note in notes:
+            abstract = note.get("abstract", "")
+            is_standalone = any(abstract.startswith(p) for p in standalone_prefixes)
+
+            if is_standalone:
+                standalone_note_ids.append(note["id"])
+                # Also include the note-link relationships for standalone notes
+                for rel in rel_by_endpoint.get(note["id"], []):
+                    standalone_note_ids.append(rel["id"])
+                continue
+
+            # Flood-fill cluster from this note
+            cluster_ids = {note["id"]}
+
+            # Add note's object_refs (excluding VigilIntel identity)
+            for ref in note.get("object_refs", []):
+                if ref != vigilintel_identity_id:
+                    cluster_ids.add(ref)
+
+            # Iterative flood-fill via relationships
+            changed = True
+            while changed:
+                changed = False
+                for rel in relationships:
+                    src, tgt = rel["source_ref"], rel["target_ref"]
+                    # If one endpoint is in cluster, pull in the relationship + other endpoint
+                    if src in cluster_ids or tgt in cluster_ids:
+                        if rel["id"] not in cluster_ids:
+                            cluster_ids.add(rel["id"])
+                            changed = True
+                        # Add the other endpoint (but not the VigilIntel identity)
+                        for ep in (src, tgt):
+                            if ep not in cluster_ids and ep != vigilintel_identity_id:
+                                cluster_ids.add(ep)
+                                changed = True
+
+            clusters.append({"seed_note": note, "object_ids": cluster_ids})
+
+        # Step 4: Merge overlapping clusters (in case two notes share entities)
+        merged = True
+        while merged:
+            merged = False
+            for i in range(len(clusters)):
+                for j in range(i + 1, len(clusters)):
+                    if clusters[i]["object_ids"] & clusters[j]["object_ids"]:
+                        clusters[i]["object_ids"] |= clusters[j]["object_ids"]
+                        # Keep the note with the richer abstract as seed
+                        if len(clusters[j]["seed_note"].get("object_refs", [])) > len(clusters[i]["seed_note"].get("object_refs", [])):
+                            clusters[i]["seed_note"] = clusters[j]["seed_note"]
+                        clusters.pop(j)
+                        merged = True
+                        break
+                if merged:
+                    break
+
+        # Step 5: Create sub-reports for each cluster
+        report_date = original_report.get("published", original_report.get("created"))
+        report_markings = original_report.get("object_marking_refs", [])
+        created_by = original_report.get("created_by_ref", vigilintel_identity_id)
+
+        sub_report_ids = []
+        new_objects = []
+
+        for cluster in clusters:
+            seed = cluster["seed_note"]
+            abstract = seed.get("abstract", "Unknown topic")
+
+            # Determine report name from abstract
+            # "Threat | Framework de Malware..." → "Framework de Malware..."
+            # "Breach | Kash Patel..." → "Kash Patel..."
+            # "Vulnerability | CVE-2025-53521..." → "CVE-2025-53521..."
+            parts = abstract.split(" | ", 1)
+            if len(parts) == 2:
+                report_name = parts[1]
+                # Remove trailing date if present: " (2026-03-30)"
+                report_name = re.sub(r'\s*\(\d{4}-\d{2}-\d{2}\)\s*$', '', report_name)
+                report_type_prefix = parts[0]
+            else:
+                report_name = abstract
+                report_type_prefix = "Unknown"
+
+            # Build object_refs for sub-report (only real objects, not the report itself)
+            cluster_refs = [oid for oid in cluster["object_ids"] if oid in obj_map]
+
+            # Generate deterministic sub-report ID from original report ID + seed note ID
+            sub_id_input = f"{original_report['id']}:{seed['id']}"
+            sub_id_hash = hashlib.sha256(sub_id_input.encode()).hexdigest()[:32]
+            # Format as UUID v5-like
+            sub_report_id = f"report--{sub_id_hash[:8]}-{sub_id_hash[8:12]}-{sub_id_hash[12:16]}-{sub_id_hash[16:20]}-{sub_id_hash[20:32]}"
+
+            sub_report = {
+                "type": "report",
+                "spec_version": "2.1",
+                "id": sub_report_id,
+                "created": original_report.get("created"),
+                "modified": original_report.get("modified"),
+                "created_by_ref": created_by,
+                "name": report_name,
+                "description": f"VigilIntel - {report_type_prefix}",
+                "published": report_date,
+                "report_types": ["threat-report"],
+                "object_refs": cluster_refs,
+                "labels": seed.get("labels", ["vigilintel"]),
+            }
+            if report_markings:
+                sub_report["object_marking_refs"] = report_markings
+
+            # Copy external_references from seed note if present
+            if seed.get("external_references"):
+                sub_report["external_references"] = seed["external_references"]
+
+            new_objects.append(sub_report)
+            sub_report_ids.append(sub_report_id)
+
+        # Step 6: Rewrite original report to reference only sub-reports + standalone notes
+        daily_refs = sub_report_ids + standalone_note_ids
+        original_report["object_refs"] = daily_refs
+        original_report["description"] = f"VigilIntel Daily Digest - {len(clusters)} topics, {len(standalone_note_ids)} standalone notes"
+
+        # Step 7: Rebuild the bundle with all objects + new sub-reports
+        final_objects = objects + new_objects
+        bundle_data["objects"] = final_objects
+
+        return bundle_data
+
     def _process_stix_bundle(self, bundle_data: Dict, work_id: str, report_date: datetime) -> Tuple[int, str]:
         try:
             if bundle_data.get("type") != "bundle":
@@ -222,8 +394,18 @@ class VigilIntelConnector:
                 type_counts[t] = type_counts.get(t, 0) + 1
 
             self.helper.log_info(f"STIX Bundle: {len(objects)} objects - {type_counts}")
+
+            # Split into sub-reports
+            bundle_data = self._split_stix_bundle(bundle_data)
+            split_objects = bundle_data.get("objects", [])
+            sub_reports = [o for o in split_objects if o["type"] == "report" and o["id"] != [o2 for o2 in split_objects if o2["type"] == "report" and "Daily" in o2.get("description", "")]]
+
+            # Count new sub-reports
+            new_reports = [o for o in split_objects if o["type"] == "report"]
+            self.helper.log_info(f"Split bundle: {len(split_objects)} objects, {len(new_reports)} reports (1 daily + {len(new_reports) - 1} sub-reports)")
+
             self.helper.send_stix2_bundle(json.dumps(bundle_data), update=self.update_existing_data, work_id=work_id)
-            return len(objects), f"Imported {len(objects)} STIX objects"
+            return len(split_objects), f"Imported {len(split_objects)} STIX objects ({len(new_reports)} reports)"
         except Exception as e:
             self.helper.log_error(f"STIX error: {str(e)}")
             return 0, f"Error: {str(e)}"
