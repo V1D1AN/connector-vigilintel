@@ -15,7 +15,6 @@ services:
       - CONNECTOR_NAME=VigilIntel
       - CONNECTOR_SCOPE=vigilintel
       - CONNECTOR_LOG_LEVEL=${CONNECTOR_LOG_LEVEL:-info}
-      - CONNECTOR_DURATION_PERIOD=${CONNECTOR_DURATION_PERIOD:-PT24H}
       - CONNECTOR_UPDATE_EXISTING_DATA=${CONNECTOR_UPDATE_EXISTING_DATA:-true}
       # VigilIntel - Format: "stix" (recommended) or "json"
       - VIGILINTEL_FORMAT=${VIGILINTEL_FORMAT:-stix}
