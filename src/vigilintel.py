@@ -46,6 +46,17 @@ class VigilIntelConnector:
         self.update_existing_data = get_config_variable("CONNECTOR_UPDATE_EXISTING_DATA", ["connector", "update_existing_data"], config, default=True)
         self.create_indicators = get_config_variable("VIGILINTEL_CREATE_INDICATORS", ["vigilintel", "create_indicators"], config, default=True)
 
+        # Default marking (TLP) applied to every object produced by this connector
+        # Accepted values: "TLP:CLEAR", "TLP:WHITE", "TLP:GREEN", "TLP:AMBER",
+        # "TLP:AMBER+STRICT", "TLP:RED", or "" / None to disable.
+        default_marking_raw = get_config_variable(
+            "VIGILINTEL_DEFAULT_MARKING",
+            ["vigilintel", "default_marking"],
+            config,
+            default="TLP:AMBER",
+        )
+        self.default_marking_id = self._resolve_marking_id(default_marking_raw)
+
         # Import options
         self.import_threat_actors = get_config_variable("VIGILINTEL_IMPORT_THREAT_ACTORS", ["vigilintel", "import_threat_actors"], config, default=True)
         self.import_vulnerabilities = get_config_variable("VIGILINTEL_IMPORT_VULNERABILITIES", ["vigilintel", "import_vulnerabilities"], config, default=True)
@@ -87,6 +98,134 @@ class VigilIntelConnector:
         self.mitre_pattern = r'T\d{4}(?:\.\d{3})?'
 
         self.helper.log_info(f"VigilIntel Connector v2 initialized - Format: {self.format}, Language: {self.language}")
+
+    # ─── Marking helpers ──────────────────────────────────────────────
+
+    # Standard STIX 2.1 TLP marking-definition IDs (see oasis-open spec)
+    _TLP_STIX_IDS = {
+        "TLP:CLEAR": "marking-definition--94868c89-83c2-464b-929b-a1a8aa3c8487",
+        "TLP:WHITE": "marking-definition--613f2e26-407d-48c7-9eca-b8e91df99dc9",
+        "TLP:GREEN": "marking-definition--34098fce-860f-48ae-8e50-ebd3cc5e41da",
+        "TLP:AMBER": "marking-definition--f88d31f6-486f-44da-b317-01333bde0b82",
+        # AMBER+STRICT and RED are OpenCTI-specific (not in STIX 2.1 spec)
+        # OpenCTI generates deterministic IDs for them — we let the platform handle resolution
+        # by sending only the standard ones. For AMBER+STRICT/RED we fall back to AMBER here
+        # and rely on the helper API for a proper resolution at runtime.
+    }
+
+    def _resolve_marking_id(self, value):
+        """Resolve a TLP string into a STIX marking-definition ID.
+
+        For standard TLP levels (CLEAR/WHITE/GREEN/AMBER) we use the OASIS-defined IDs.
+        For AMBER+STRICT and RED (OpenCTI extensions) we ask the API to resolve/create
+        the marking and return its standard_id.
+        """
+        if not value:
+            return None
+        v = str(value).strip().upper()
+        if v in ("", "NONE", "FALSE"):
+            return None
+        # Normalise common aliases
+        if v in ("CLEAR", "WHITE", "GREEN", "AMBER", "RED"):
+            v = f"TLP:{v}"
+        if v == "AMBER+STRICT" or v == "TLP:AMBER+STRICT":
+            v = "TLP:AMBER+STRICT"
+
+        if v in self._TLP_STIX_IDS:
+            self.helper.log_info(f"Default marking set to {v}")
+            return self._TLP_STIX_IDS[v]
+
+        # AMBER+STRICT / RED → resolve via OpenCTI API
+        try:
+            definition_type = "TLP"
+            definition = v.split(":", 1)[1] if ":" in v else v
+            marking = self.helper.api.marking_definition.read(
+                filters={
+                    "mode": "and",
+                    "filters": [
+                        {"key": "definition_type", "values": [definition_type]},
+                        {"key": "definition", "values": [definition]},
+                    ],
+                    "filterGroups": [],
+                }
+            )
+            if marking and marking.get("standard_id"):
+                self.helper.log_info(f"Default marking resolved via API: {v} → {marking['standard_id']}")
+                return marking["standard_id"]
+            self.helper.log_warning(
+                f"Could not resolve marking '{v}' via API — default marking disabled"
+            )
+            return None
+        except Exception as e:
+            self.helper.log_warning(f"Error resolving marking '{v}': {e} — default marking disabled")
+            return None
+
+    # SDO/SRO types that accept object_marking_refs (per STIX 2.1 spec).
+    # We exclude bundle, marking-definition itself, language-content, and meta types.
+    _MARKABLE_TYPES = {
+        "attack-pattern", "campaign", "course-of-action", "grouping",
+        "identity", "incident", "indicator", "infrastructure", "intrusion-set",
+        "location", "malware", "malware-analysis", "note", "observed-data",
+        "opinion", "report", "threat-actor", "tool", "vulnerability",
+        "relationship", "sighting",
+        # SCOs (observables) also support object_marking_refs in STIX 2.1
+        "ipv4-addr", "ipv6-addr", "domain-name", "url", "file", "email-addr",
+        "email-message", "mac-addr", "autonomous-system", "directory",
+        "network-traffic", "process", "software", "user-account",
+        "windows-registry-key", "x509-certificate", "artifact",
+    }
+
+    def _apply_marking_to_bundle(self, bundle_data):
+        """Inject self.default_marking_id into every markable object of the bundle.
+
+        - Adds the marking-definition object to the bundle if not already present.
+        - Appends the marking ref to existing object_marking_refs (no duplication).
+        - Skips bundle root, marking-definition objects, and unsupported types.
+
+        Works on a dict bundle (mutated in place) and returns it.
+        """
+        if not self.default_marking_id:
+            return bundle_data
+        if not isinstance(bundle_data, dict):
+            return bundle_data
+
+        objects = bundle_data.get("objects", [])
+        if not objects:
+            return bundle_data
+
+        marking_id = self.default_marking_id
+        existing_marking_ids = {
+            o["id"] for o in objects if o.get("type") == "marking-definition"
+        }
+
+        marked_count = 0
+        for obj in objects:
+            otype = obj.get("type")
+            if otype not in self._MARKABLE_TYPES:
+                continue
+            refs = obj.get("object_marking_refs") or []
+            if marking_id not in refs:
+                refs = list(refs) + [marking_id]
+                obj["object_marking_refs"] = refs
+                marked_count += 1
+
+        # Inject the marking-definition object if absent and it's a known TLP
+        if marking_id not in existing_marking_ids and marking_id in self._TLP_STIX_IDS.values():
+            inv = {v: k for k, v in self._TLP_STIX_IDS.items()}
+            tlp_label = inv[marking_id]
+            objects.append({
+                "type": "marking-definition",
+                "spec_version": "2.1",
+                "id": marking_id,
+                "created": "2022-10-01T00:00:00.000Z",
+                "definition_type": "tlp",
+                "name": tlp_label,
+                "definition": {"tlp": tlp_label.split(":", 1)[1].lower()},
+            })
+
+        if marked_count:
+            self.helper.log_info(f"Applied default marking to {marked_count} objects")
+        return bundle_data
 
     # ─── Utility helpers ───────────────────────────────────────────────
 
@@ -397,6 +536,10 @@ class VigilIntelConnector:
 
             # Split into sub-reports
             bundle_data = self._split_stix_bundle(bundle_data)
+
+            # Apply default marking to every markable object (no-op if disabled)
+            bundle_data = self._apply_marking_to_bundle(bundle_data)
+
             split_objects = bundle_data.get("objects", [])
             sub_reports = [o for o in split_objects if o["type"] == "report" and o["id"] != [o2 for o2 in split_objects if o2["type"] == "report" and "Daily" in o2.get("description", "")]]
 
@@ -959,7 +1102,14 @@ class VigilIntelConnector:
             all_objects.append(daily)
 
             bundle = Bundle(objects=all_objects, allow_custom=True)
-            self.helper.send_stix2_bundle(bundle.serialize(), update=self.update_existing_data, work_id=work_id)
+
+            # Apply default marking (round-trip via dict to mutate immutable stix2 objects)
+            if self.default_marking_id:
+                bundle_dict = json.loads(bundle.serialize())
+                bundle_dict = self._apply_marking_to_bundle(bundle_dict)
+                self.helper.send_stix2_bundle(json.dumps(bundle_dict), update=self.update_existing_data, work_id=work_id)
+            else:
+                self.helper.send_stix2_bundle(bundle.serialize(), update=self.update_existing_data, work_id=work_id)
 
             status = f"Imported {len(all_objects)} objects ({stats})"
             self.helper.log_info(status)

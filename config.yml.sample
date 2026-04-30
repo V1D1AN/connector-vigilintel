@@ -16,6 +16,9 @@ vigilintel:
   language: "en"  # "en" or "fr"
   interval: 86400
   days_to_import: 1
+  # Default TLP marking applied to ALL objects produced by this connector.
+  # Accepted: TLP:CLEAR, TLP:GREEN, TLP:AMBER, TLP:AMBER+STRICT, TLP:RED, or "" to disable.
+  default_marking: "TLP:AMBER"
   # JSON format options:
   import_threat_actors: true
   import_vulnerabilities: true
